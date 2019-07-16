@@ -49,7 +49,8 @@
  * To enable the log of rate changes:
  * export NS_LOG=RateAdaptationDistance=level_info
  */
-
+#include "ns3/core-module.h"
+#include <ns3/config-store-module.h>
 #include "ns3/gnuplot.h"
 #include "ns3/command-line.h"
 #include "ns3/config.h"
@@ -65,6 +66,11 @@
 #include "ns3/on-off-helper.h"
 #include "ns3/yans-wifi-channel.h"
 #include "ns3/mobility-model.h"
+
+// FLOW MONITOR
+#include "ns3/flow-monitor-module.h"
+#include "ns3/flow-monitor-helper.h"
+#include "ns3/flow-probe.h"
 
 using namespace ns3;
 using namespace std;
@@ -145,29 +151,50 @@ void RateCallback (std::string path, uint64_t rate, Mac48Address dest)
   NS_LOG_INFO ((Simulator::Now ()).GetSeconds () << " " << dest << " Rate " <<  rate / 1000000.0);
 }
 
+
+static ns3::GlobalValue g_shortGuardInterval ("shortGuardIntervalG",
+							 "Enable Short Guard Interval in all stations",
+               				 ns3::BooleanValue (false),
+               				 ns3::MakeBooleanChecker());
+
+static ns3::GlobalValue g_ApStaManager ("ApStaManagerG",
+							 "Rate Adaptation algorithm",
+               				 ns3::StringValue ("ns3::AarfWifiManager"),
+               				 ns3::MakeStringChecker());
+
+static ns3::GlobalValue g_ap1_x ("ap1_xG",
+							 "Dist ap1_x",
+                              ns3::UintegerValue (0),
+                              ns3::MakeUintegerChecker<uint32_t> ());
+
 int main (int argc, char *argv[])
 {
-  uint32_t rtsThreshold = 65535;
-  std::string staManager = "ns3::MinstrelWifiManager";
-  std::string apManager = "ns3::MinstrelWifiManager";
-  std::string standard = "802.11g";
-  std::string outputFileName = "Gnew";
+  //uint32_t rtsThreshold = 65535;
+  uint32_t rtsThreshold = 5000;
+  //std::string staManager = "ns3::MinstrelHtWifiManager";
+  //std::string staManager = "ns3::AarfWifiManager";
+  //std::string apManager = "ns3::MinstrelHtWifiManager";
+  //std::string apManager = "ns3::AarfWifiManager";
+  //std::string standard = "802.11n-5GHz";
+  std::string standard = "802.11a";
+  //std::string outputFileName = "minstrelHT";
+  std::string outputFileName = "aarf";
   uint32_t BE_MaxAmpduSize = 65535;
-  bool shortGuardInterval = false;
+  //bool shortGuardInterval = false;
   uint32_t chWidth = 20;
-  int ap1_x = 0;
+ // int ap1_x = 0;
   int ap1_y = 0;
   int sta1_x = 5;
   int sta1_y = 0;
-  int steps = 125;
-  int stepsSize = 2;
-  int stepsTime = 2;
+  int steps = 1;
+  int stepsSize = 1;
+  int stepsTime = 1;
 
   CommandLine cmd;
-  cmd.AddValue ("staManager", "PRC Manager of the STA", staManager);
-  cmd.AddValue ("apManager", "PRC Manager of the AP", apManager);
+   //cmd.AddValue ("staManager", "PRC Manager of the STA", staManager);
+  //cmd.AddValue ("apManager", "PRC Manager of the AP", apManager);
   cmd.AddValue ("standard", "Wifi Phy Standard", standard);
-  cmd.AddValue ("shortGuardInterval", "Enable Short Guard Interval in all stations", shortGuardInterval);
+  //cmd.AddValue ("shortGuardInterval", "Enable Short Guard Interval in all stations", shortGuardInterval);
   cmd.AddValue ("channelWidth", "Channel width of all the stations", chWidth);
   cmd.AddValue ("rtsThreshold", "RTS threshold", rtsThreshold);
   cmd.AddValue ("BE_MaxAmpduSize", "BE Mac A-MPDU size", BE_MaxAmpduSize);
@@ -175,12 +202,36 @@ int main (int argc, char *argv[])
   cmd.AddValue ("steps", "How many different distances to try", steps);
   cmd.AddValue ("stepsTime", "Time on each step", stepsTime);
   cmd.AddValue ("stepsSize", "Distance between steps", stepsSize);
-  cmd.AddValue ("AP1_x", "Position of AP1 in x coordinate", ap1_x);
+  //cmd.AddValue ("AP1_x", "Position of AP1 in x coordinate", ap1_x);
   cmd.AddValue ("AP1_y", "Position of AP1 in y coordinate", ap1_y);
   cmd.AddValue ("STA1_x", "Position of STA1 in x coordinate", sta1_x);
   cmd.AddValue ("STA1_y", "Position of STA1 in y coordinate", sta1_y);
   cmd.Parse (argc, argv);
 
+  ConfigStore inputConfig;
+  inputConfig.ConfigureDefaults ();
+  inputConfig.ConfigureAttributes ();
+
+
+  UintegerValue uintegerValue;
+  IntegerValue integerValue;
+  DoubleValue doubleValue;
+  BooleanValue booleanValue;
+  StringValue stringValue;
+
+
+  GlobalValue::GetValueByName ("shortGuardIntervalG", booleanValue);
+  uint32_t shortGuardInterval = booleanValue.Get ();
+  GlobalValue::GetValueByName ("ApStaManagerG", stringValue);
+  std::string ApStaManager = stringValue.Get ();
+  GlobalValue::GetValueByName ("ap1_xG", uintegerValue);
+  uint32_t ap1_x = uintegerValue.Get ();
+
+  std::string staManager = ApStaManager;
+  std::string apManager = ApStaManager;
+
+  inputConfig.ConfigureAttributes ();
+  
   int simuTime = steps * stepsTime;
 
   // Define the APs
@@ -340,7 +391,16 @@ int main (int argc, char *argv[])
   //-- Setup stats and data collection
   //--------------------------------------------
 
-  //Register packet receptions to calculate throughput
+  //////////////////// Flow Monitor /////////////////////////
+ AsciiTraceHelper asciiTraceHelper;
+ Ptr<FlowMonitor> flowMonitor;
+ FlowMonitorHelper flowHelper;
+ flowMonitor = flowHelper.InstallAll();
+
+ ////////////////////////////////////
+
+
+ //Register packet receptions to calculate throughput
   Config::Connect ("/NodeList/1/ApplicationList/*/$ns3::PacketSink/Rx",
                    MakeCallback (&NodeStatistics::RxCallback, &atpCounter));
 
@@ -351,13 +411,205 @@ int main (int argc, char *argv[])
   Simulator::Stop (Seconds (simuTime));
   Simulator::Run ();
 
+static bool verbose = true;
+uint32_t m_bytesTotal=0;
+std::string dl_results,ul_results;
+std::string sshortGuardInterval = std::to_string (shortGuardInterval); 
+dl_results = "DL_Results_Sim_shortGuardIntervalG_" + sshortGuardInterval +"_ApStaManagerG_" + staManager +".txt";
+ul_results = "UL_Results_Sim_shortGuardIntervalG_" + sshortGuardInterval +"_ApStaManagerG_" + staManager +".txt";
+
+
+Ptr<OutputStreamWrapper> DLstreamMetricsInit = asciiTraceHelper.CreateFileStream((dl_results));
+*DLstreamMetricsInit->GetStream()
+            << "Flow_ID, Lost_Packets, Tx_Packets, Tx_Bytes, TxOffered(Mbps),  Rx_Packets, Rx_Bytes, T_put(Mbps), Mean_Delay_Rx_Packets, Mean_Jitter, Packet_Loss_Ratio"
+            << std::endl;
+
+Ptr<OutputStreamWrapper> ULstreamMetricsInit = asciiTraceHelper.CreateFileStream((ul_results));
+*ULstreamMetricsInit->GetStream()
+            << "Flow_ID, Lost_Packets, Tx_Packets, Tx_Bytes, TxOffered(Mbps),  Rx_Packets, Rx_Bytes, T_put(Mbps), Mean_Delay_Rx_Packets, Mean_Jitter, Packet_Loss_Ratio"
+            << std::endl;
+
+double statDurationTX = 0;
+double statDurationRX = 0;
+Ptr<Ipv4FlowClassifier> classifier = DynamicCast<Ipv4FlowClassifier>(flowHelper.GetClassifier());
+
+std::map<FlowId, FlowMonitor::FlowStats> stats = flowMonitor->GetFlowStats();
+for (std::map<FlowId, FlowMonitor::FlowStats>::const_iterator iter =
+    stats.begin(); iter != stats.end(); ++iter)
+  {
+    // some metrics calculation
+    statDurationRX = iter->second.timeLastRxPacket.GetSeconds()
+                  - iter->second.timeFirstTxPacket.GetSeconds();
+    statDurationTX = iter->second.timeLastTxPacket.GetSeconds()
+                  - iter->second.timeFirstTxPacket.GetSeconds();
+
+    double meanDelay, meanJitter, packetLossRatio, txTput, rxTput;
+    if (iter->second.rxPackets > 0)
+      {
+        meanDelay = (iter->second.delaySum.GetSeconds()
+            / iter->second.rxPackets);
+      }
+    else // this value is set to zero because the STA is not receiving any packet
+      {
+        meanDelay = 0;
+      }
+    //
+    if (iter->second.rxPackets > 1)
+      {
+        meanJitter = (iter->second.jitterSum.GetSeconds()
+            / (iter->second.rxPackets - 1));
+      }
+    else // this value is set to zero because the STA is not receiving any packet
+      {
+        meanJitter = 0;
+      }
+    //
+    if (statDurationTX > 0)
+      {
+        txTput = iter->second.txBytes * 8.0 / statDurationTX / 1000 / 1000;
+      }
+    else
+      {
+        txTput = 0;
+      }
+    //
+    if (statDurationRX > 0)
+      {
+        rxTput = iter->second.rxBytes * 8.0 / statDurationRX / 1000 / 1000;
+      }
+    else
+      {
+        rxTput = 0;
+      }
+    //
+    if ((iter->second.lostPackets > 0) & (iter->second.rxPackets > 0))
+      {
+        packetLossRatio = (double) (iter->second.lostPackets
+            / (double) (iter->second.rxPackets + iter->second.lostPackets));
+      }
+    else
+      {
+        packetLossRatio = 0;
+      }
+    //
+    Ipv4FlowClassifier::FiveTuple t = classifier->FindFlow(iter->first);
+    //
+    if (verbose)
+           {
+             // Print information only if enabled
+             //
+             //          std::cout << "Flow ID: " << iter->first << ", Source Port: "
+             //              << t.sourcePort << ", Destination Port: " << t.destinationPort
+             //              << " (" << t.sourceAddress << " -> " << t.destinationAddress
+             //              << ")" << std::endl;
+             //
+             NS_LOG_UNCOND( "Flow ID: " << iter->first << ", Source Port: "
+                 << t.sourcePort << ", Destination Port: " << t.destinationPort
+                 << " (" << t.sourceAddress << " -> " << t.destinationAddress
+                 << ")");
+             //
+             NS_LOG_UNCOND( "Lost Packets = " << iter->second.lostPackets);
+             //
+             NS_LOG_UNCOND( "Tx Packets = " << iter->second.txPackets);
+             //
+             NS_LOG_UNCOND( "Tx Bytes = " << iter->second.txBytes);
+             //
+             NS_LOG_UNCOND( "TxOffered = " << txTput << " Mbps");
+             //std::cout << "TxOffered = " << txTput << " Mbps" << std::endl;
+             //
+             NS_LOG_UNCOND( "Rx Packets = " << iter->second.rxPackets);
+             //
+             NS_LOG_UNCOND( "Rx Bytes = " << iter->second.rxBytes);
+             //
+             NS_LOG_UNCOND( "T-put = " << rxTput << " Mbps");
+             //std::cout << "T-put = " << rxTput << " Mbps" << std::endl;
+             //
+             NS_LOG_UNCOND( "Mean Delay Rx Packets = " << meanDelay << " s");
+             //std::cout << "Mean Delay Rx Packets = " << meanDelay << " s"
+             //    << std::endl;
+             //
+             NS_LOG_UNCOND( "Mean jitter = " << meanJitter << " s");
+             //std::cout << "Mean jitter = " << meanJitter << " s" << std::endl;
+             //
+             NS_LOG_UNCOND( "Packet loss ratio = " << packetLossRatio);
+             //std::cout << "Packet loss ratio = " << packetLossRatio << std::endl;
+             //
+           }
+         //
+         Ptr<OutputStreamWrapper> streamMetricsInit = NULL;
+         // Get file pointer for DL, if DL flow (using port and IP address to assure correct result)
+         std::cout << "t destination port " << t.destinationPort  <<std::endl;
+         //std::cout << "source address " << interfaces.GetAddress(0)  <<std::endl;
+         std::cout << "source address " << t.sourceAddress  <<std::endl;
+         std::cout << "t destination port " << t.destinationPort  <<std::endl;
+         std::cout << "sink address " << sinkAddress  <<std::endl;
+         std::cout << "destination address " << t.destinationAddress  <<std::endl;
+         if ((t.destinationPort == port)
+             & (t.sourceAddress == i.GetAddress (1)))
+           {
+             streamMetricsInit = DLstreamMetricsInit;
+           }
+         // Get file pointer for UL, if UL flow (using port and IP address to assure correct result))
+         else if ((t.destinationPort == port)
+             & (t.destinationAddress == sinkAddress))
+           {
+             streamMetricsInit = ULstreamMetricsInit;
+           }
+         //
+         if (streamMetricsInit)
+           {
+             *streamMetricsInit->GetStream() << (iter->first ) << ", "
+                 << (iter->second.lostPackets) << ", "
+                 //
+                 << (iter->second.txPackets) << ", "
+                 //
+                 << (iter->second.txBytes) << ", "
+                 //
+                 << txTput << ", "
+                 //
+                 << (iter->second.rxPackets) << ", "
+                 //
+                 << (iter->second.rxBytes) << ", "
+                 //
+                 << rxTput << ", "
+                 //
+                 << meanDelay << ", "
+                 //
+                 << meanJitter << ", "
+                 //
+                 << packetLossRatio 
+                 //
+                 << std::endl;
+           }
+         else
+           {
+             //TODO: chance for an ASSERT
+             if ( true )
+               {
+                 std::cout << "Some problem to save metrics" << std::endl;
+                 std::cout << "Flow ID: " << iter->first << ", Source Port: "
+                     << t.sourcePort << ", Destination Port: " << t.destinationPort
+                     << " (" << t.sourceAddress << " -> " << t.destinationAddress << ")" << std::endl;
+                 std::cout << "AP Address: " << i.GetAddress(0) << std::endl;
+                 std::cout << "DLport: " << port << std::endl;
+                 std::cout << "ULport: " << port << std::endl;
+               }
+           }
+         m_bytesTotal =+ iter->second.rxPackets;
+  }
+
+ flowMonitor->SerializeToXmlFile("NameOfFile.xml", true, true);
+  
   std::ofstream outfile (("throughput-" + outputFileName + ".plt").c_str ());
   Gnuplot gnuplot = Gnuplot (("throughput-" + outputFileName + ".eps").c_str (), "Throughput");
   gnuplot.SetTerminal ("post eps color enhanced");
-  gnuplot.SetLegend ("Distance (meters)", "Throughput (Mb/s)");
-  gnuplot.SetTitle ("Throughput (AP to STA) vs distance");
+  gnuplot.SetLegend ("Time (seconds)", "Throughput (Mb/s)");
+  gnuplot.SetTitle ("Throughput (AP to STA) vs time");
   gnuplot.AddDataset (atpCounter.GetDatafile ());
   gnuplot.GenerateOutput (outfile);
+  
+
+
 
   Simulator::Destroy ();
 
